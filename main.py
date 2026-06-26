@@ -28,39 +28,58 @@ class OptimizationRequest(BaseModel):
 
 @app.post("/api/optimize-schedule")
 async def optimize_schedule(data: OptimizationRequest):
-    # 1. Filter out slots that haven't actually been tracked yet
     tracked_slots = [item for item in data.routine_history if (item.completed + item.skipped) > 0]
     
     if not tracked_slots:
         return {"recommendation": "Keep tracking your daily routine! Once you complete or skip slots, your AI coach will give you personalized insights here."}
 
-    # 2. Find the slot with the lowest completion rate using clean math
-    # Completion Rate = Completed / (Completed + Skipped)
-    worst_slot = min(tracked_slots, key=lambda x: (x.completed / (x.completed + x.skipped)))
-    worst_rate = worst_slot.completed / (worst_slot.completed + worst_slot.skipped)
+    # --- 🤖 1. K-MEANS CLUSTERING ENGINE ---
+    # Prepare data points: [completion_rate, total_tracked_count]
+    features = []
+    for item in tracked_slots:
+        total = item.completed + item.skipped
+        comp_rate = item.completed / total
+        features.append([comp_rate, total])
 
-    # 🚨 DATA GUARD: If total tracking interactions are low, use safe fallback math analysis
-    total_tracked_events = sum(item.completed + item.skipped for item in tracked_slots)
-    
-    if total_tracked_events < 4:
-        return {"recommendation": f"Early tracking note: You've had some friction with '{worst_slot.activity}' recently. Keep following your schedule to unlock advanced clustering insights!"}
+    # K-Means requires at least as many samples as clusters (2 clusters = min 2 items tracked)
+    ml_detected_problems = []
+    if len(features) >= 2:
+        X = np.array(features)
+        
+        # Split routine into 2 groups: High Performance vs Friction Vectors
+        kmeans = KMeans(n_clusters=2, random_state=42, n_init="auto")
+        clusters = kmeans.fit_predict(X)
+        
+        # Identify which cluster center represents the lower completion rate
+        cluster_centers = kmeans.cluster_centers_
+        low_perf_cluster_idx = np.argmin(cluster_centers[:, 0])
+        
+        # Filter out the specific activities grouped into the low-efficiency cluster
+        ml_detected_problems = [tracked_slots[i] for i, c in enumerate(clusters) if c == low_perf_cluster_idx]
 
-    # 3. Contextual Rule Engine (Matches text keywords and time slots accurately)
+    # --- 🎯 2. DECISION MATRIX & RECOMMENDATION ---
+    # Prioritize clustering insights if ML found distinct friction points, otherwise fall back to math min
+    if ml_detected_problems:
+        worst_slot = min(ml_detected_problems, key=lambda x: (x.completed / (x.completed + x.skipped)))
+    else:
+        worst_slot = min(tracked_slots, key=lambda x: (x.completed / (x.completed + x.skipped)))
+
+    # --- 💬 3. CONTEXTUAL OVERRIDES ---
     activity_lower = worst_slot.activity.lower()
     
-    # Check for Late Night Slots (Any task running at 9:30 PM, 10:00 PM, 11:00 PM, or 12:00 AM)
-    if "9:30 pm" in worst_slot.time.lower() or "12:00 am" in worst_slot.time.lower() or "10:" in worst_slot.time or "11:" in worst_slot.time:
+    # Late Night Filter
+    if any(time_key in worst_slot.time.lower() for time_key in ["9:30 pm", "12:00 am", "10:", "11:"]):
         return {"recommendation": f"Friction detected late at night. You are frequently skipping '{worst_slot.activity}' at {worst_slot.time}. Try shifting this core study block to an afternoon window when your focus is higher."}
     
-    # Check for Refreshment/Break/Nap Slots
-    elif "refreshment" in activity_lower or "break" in activity_lower or "nap" in activity_lower:
+    # Rest / Refreshment Filter
+    elif any(rest_key in activity_lower for rest_key in ["refreshment", "break", "nap"]):
         return {"recommendation": f"You are consistently skipping your '{worst_slot.activity}' at {worst_slot.time}. Skipping rest blocks leads to mental burnout. Force yourself to step away from your screens for 10 minutes!"}
     
-    # Check for Core Study / Code / Class Slots
-    elif "study" in activity_lower or "slot" in activity_lower or "class" in activity_lower or "code" in activity_lower:
+    # Core Technical/Study Focus Filter
+    elif any(study_key in activity_lower for study_key in ["study", "slot", "class", "code"]):
         return {"recommendation": f"Friction detected around your deep focus block: '{worst_slot.activity}' ({worst_slot.time}). Consider reducing its initial length or anchoring it directly after your 10-minute relaxation break."}
     
-    # Standard catch-all recommendation
+    # Standard Catch-all
     else:
         return {"recommendation": f"Your routine history shows a bottleneck around '{worst_slot.activity}' ({worst_slot.time}). Try breaking this task into smaller, bite-sized daily objectives."}
 
